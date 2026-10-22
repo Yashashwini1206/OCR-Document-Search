@@ -1,0 +1,14 @@
+
+venv/
+__pycache__/
+*.pyc
+.env
+.streamlit/secrets.toml
+
+# Do not upload office documents or local test files
+*.pdf
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
