@@ -1,19 +1,19 @@
 
 import re
+from difflib import SequenceMatcher
 
 
 def normalize_word(text):
-    """Normalize a word for case-insensitive matching."""
-    return re.sub(r"^[^\w]+|[^\w]+$", "", text.casefold())
+    """Lowercase and remove punctuation for matching."""
+    return re.sub(r"[^a-z0-9]", "", text.casefold())
+
+
+def similarity(a, b):
+    """Compare normalized OCR text with the search term."""
+    return SequenceMatcher(None, a, b).ratio()
 
 
 def search_pages(pages, query):
-    """
-    Search processed PDF pages and return matching word positions.
-
-    Each result includes the page number, extraction method,
-    matched words, and their PDF coordinates.
-    """
     query_words = [
         normalize_word(word)
         for word in query.split()
@@ -27,32 +27,99 @@ def search_pages(pages, query):
 
     for page in pages:
         words = page.get("words", [])
-        normalized_words = [
-            normalize_word(word["text"])
+        normalized = [
+            normalize_word(word.get("text", ""))
             for word in words
         ]
 
-        for start in range(len(normalized_words)):
-            end = start + len(query_words)
+        for start, candidate in enumerate(normalized):
+            if not candidate:
+                continue
 
-            if normalized_words[start:end] == query_words:
-                matched_words = words[start:end]
-
+            # Exact single-word match after normalization.
+            if len(query_words) == 1 and candidate == query_words[0]:
+                matched = words[start:start + 1]
                 results.append({
                     "page_number": page["page_number"],
                     "method": page["method"],
-                    "matched_text": " ".join(
-                        word["text"] for word in matched_words
-                    ),
+                    "matched_text": matched[0]["text"],
                     "positions": [
                         {
-                            "x0": word["x0"],
-                            "y0": word["y0"],
-                            "x1": word["x1"],
-                            "y1": word["y1"],
+                            "x0": w["x0"],
+                            "y0": w["y0"],
+                            "x1": w["x1"],
+                            "y1": w["y1"],
                         }
-                        for word in matched_words
+                        for w in matched
                     ],
+                    "match_type": "exact",
+                    "confidence": matched[0].get("confidence"),
+                })
+                continue
+
+            # Fuzzy fallback is for single-word OCR variations only.
+            if len(query_words) != 1:
+                continue
+
+            target = query_words[0]
+
+            # Short strings are too ambiguous for fuzzy matching.
+            if len(target) < 4 or len(candidate) < 3:
+                continue
+
+            # Permit a limited length difference for OCR omissions.
+            if abs(len(target) - len(candidate)) > 2:
+                continue
+
+            score = similarity(target, candidate)
+
+            # Conservative threshold; results remain unverified.
+            if score >= 0.70:
+                w = words[start]
+                results.append({
+                    "page_number": page["page_number"],
+                    "method": page["method"],
+                    "matched_text": w["text"],
+                    "positions": [{
+                        "x0": w["x0"],
+                        "y0": w["y0"],
+                        "x1": w["x1"],
+                        "y1": w["y1"],
+                    }],
+                    "match_type": "possible",
+                    "confidence": score,
                 })
 
-    return results
+    # Prefer exact matches and avoid repeated identical boxes.
+    results.sort(
+        key=lambda result: (
+            result["match_type"] != "exact",
+            result["page_number"],
+        )
+    )
+
+    unique_results = []
+    seen = set()
+
+    for result in results:
+        position_key = tuple(
+            (
+                round(p["x0"], 1),
+                round(p["y0"], 1),
+                round(p["x1"], 1),
+                round(p["y1"], 1),
+            )
+            for p in result["positions"]
+        )
+
+        key = (
+            result["page_number"],
+            result["matched_text"].casefold(),
+            position_key,
+        )
+
+        if key not in seen:
+            seen.add(key)
+            unique_results.append(result)
+
+    return unique_results
